@@ -7,18 +7,16 @@ const NGROK_URL = "https://rhinoplastic-humid-keri.ngrok-free.dev";
 
 app.get("/series", async (req, res) => {
     try {
-        console.log("✈️ Petición recibida. Conectando con el nodo residencial...");
-
-        // Llamamos a tu PC a través del túnel
         const response = await axios.get(`${NGROK_URL}/fetch-series`, {
             params: { page: req.query.page || 1 },
-            headers: { 
-                // ✅ VITAL: Salta la página de advertencia de ngrok
-                "ngrok-skip-browser-warning": "true",
-                "Accept": "application/json"
-            },
-            timeout: 25000 // Tiempo de espera generoso para el túnel
+            headers: { "ngrok-skip-browser-warning": "true" }
         });
+        // Pasamos el array tal cual viene de la PC
+        res.json(response.data); 
+    } catch (err) {
+        res.status(502).json([]);
+    }
+});
 
         // 📦 Como tu PC ya envía el ARRAY limpio [{}, {}]
         // Solo nos aseguramos de que sea un array antes de mapear
