@@ -1,54 +1,71 @@
 const express = require("express");
-const axios = require("axios");
-const cheerio = require("cheerio");
+const puppeteer = require("puppeteer");
 const app = express();
 
-// Render usa el puerto 10000 por defecto
 const PORT = process.env.PORT || 10000;
-const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-app.get("/", (req, res) => res.send("🔥 Imperio Proxy: El Norte está cerca"));
+app.get("/", (req, res) => res.send("🔥 Imperio Proxy: Modo Navegador Activo"));
 
 app.get("/series", async (req, res) => {
+    let browser = null;
     try {
-        const response = await axios.get("https://olympusbiblioteca.com/series", {
-            headers: { "User-Agent": UA }
+        // Lanzamos un navegador minimalista
+        browser = await puppeteer.launch({
+            args: ['--no-sandbox', '--disable-setuid-sandbox'],
+            headless: "new"
+        });
+        
+        const page = await browser.newPage();
+        await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+
+        // Vamos a la biblioteca y esperamos a que el JS haga su magia
+        await page.goto("https://olympusbiblioteca.com/biblioteca", {
+            waitUntil: "networkidle2",
+            timeout: 60000
         });
 
-        const $ = cheerio.load(response.data);
-        const script = $("script").filter((i, el) => $(el).html().includes("window.__NUXT__")).html();
+        // Extraemos los datos directamente de la memoria del navegador (Vue/Nuxt)
+        const mangas = await page.evaluate(() => {
+            // Buscamos en el estado interno de Nuxt que aún vive en RAM
+            const nuxt = window.__NUXT__ || window.__NUXT_DATA__;
+            if (!nuxt) return [];
 
-        if (!script) return res.json({ data: [], error: "No se encontró el script de datos" });
+            // Buscador universal de objetos con slug y name dentro del JSON de Nuxt
+            const results = [];
+            const search = (obj) => {
+                if (obj && typeof obj === 'object') {
+                    if (obj.slug && (obj.name || obj.title)) {
+                        results.push({
+                            name: obj.name || obj.title,
+                            slug: obj.slug,
+                            cover: obj.cover || ""
+                        });
+                    }
+                    Object.values(obj).forEach(search);
+                }
+            };
+            search(nuxt);
+            return results;
+        });
 
-        const rawContent = script.split("window.__NUXT__=")[1].split(";")[0];
-        
-        const mangas = [];
-        // Regex mejorada para capturar nombre y slug
-        const regex = /"name":"([^"]+)","slug":"([^"]+)"/g;
-        let match;
+        // Limpiamos duplicados y formateamos covers
+        const cleanData = Array.from(new Set(mangas.map(m => m.slug)))
+            .map(slug => {
+                const m = mangas.find(x => x.slug === slug);
+                return {
+                    name: m.name,
+                    slug: m.slug,
+                    cover: m.cover.startsWith('http') ? m.cover : `https://dashboard.olympusbiblioteca.com/storage/covers/${m.cover}`
+                };
+            });
 
-        while ((match = regex.exec(rawContent)) !== null) {
-            const name = match[1];
-            const slug = match[2];
-            
-            if (!mangas.find(m => m.slug === slug)) {
-                // ✅ CORREGIDO: Usamos .push() en lugar de .add()
-                mangas.push({
-                    name: name,
-                    slug: slug,
-                    cover: `https://dashboard.olympusbiblioteca.com/storage/covers/default.jpg`
-                });
-            }
-        }
-
-        res.json({ data: mangas });
+        res.json({ data: cleanData });
 
     } catch (err) {
         res.status(500).json({ data: [], error: err.message });
+    } finally {
+        if (browser) await browser.close(); // Cerramos para no agotar la RAM de Render
     }
 });
 
-// ✅ CORREGIDO: Escuchamos en 0.0.0.0 para que Render nos encuentre
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 Norte Conquistado en puerto ${PORT}`);
-});
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Norte con Puppeteer en puerto ${PORT}`));
