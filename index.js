@@ -3,71 +3,100 @@ const axios = require("axios");
 const app = express();
 
 const PORT = process.env.PORT || 10000;
-const SITE = "https://olympusbiblioteca.com";
-// Cambiamos a la URL de búsqueda interna, que suele estar más abierta
-const SEARCH_API = "https://dashboard.olympusbiblioteca.com/api/search";
 
-let session = { cookies: "", xsrf: "", last: 0 };
+// 🌐 Lista de dominios espejo para saltar bloqueos de IP
+const DOMAINS = [
+    "https://olympusbiblioteca.com",
+    "https://olympusscanlation.com",
+    "https://olympuslectura.com"
+];
+
+let currentConfig = { site: DOMAINS[0], cookies: "", xsrf: "", last: 0 };
 
 async function refreshSession() {
-    try {
-        const res = await axios.get(SITE, {
-            headers: { 
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    for (const domain of DOMAINS) {
+        try {
+            console.log(`🔑 Intentando sesión en: ${domain}`);
+            const res = await axios.get(domain, {
+                headers: { 
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                    "Accept-Language": "es-ES,es;q=0.9"
+                },
+                timeout: 10000
+            });
+            
+            const setCookies = res.headers["set-cookie"] || [];
+            currentConfig.cookies = setCookies.map(c => c.split(";")[0]).join("; ");
+            const match = currentConfig.cookies.match(/XSRF-TOKEN=([^;]+)/);
+            currentConfig.xsrf = match ? decodeURIComponent(match[1]) : "";
+            currentConfig.site = domain;
+            currentConfig.last = Date.now();
+            
+            if (currentConfig.xsrf) {
+                console.log(`✅ Sesión lista en ${domain}`);
+                return true;
             }
-        });
-        const setCookies = res.headers["set-cookie"] || [];
-        session.cookies = setCookies.map(c => c.split(";")[0]).join("; ");
-        const match = session.cookies.match(/XSRF-TOKEN=([^;]+)/);
-        session.xsrf = match ? decodeURIComponent(match[1]) : "";
-        session.last = Date.now();
-        console.log("✅ Sesión Refrescada");
-    } catch (e) { console.error("Error sesión:", e.message); }
+        } catch (e) {
+            console.error(`❌ Falló ${domain}: ${e.message}`);
+        }
+    }
+    return false;
 }
 
 app.get("/series", async (req, res) => {
     try {
-        if (!session.xsrf || Date.now() - session.last > 10 * 60 * 1000) await refreshSession();
+        if (!currentConfig.xsrf || Date.now() - currentConfig.last > 10 * 60 * 1000) {
+            await refreshSession();
+        }
 
-        // 🚀 Usamos el endpoint de SEARCH sin query para que nos de las novedades
-        // Este endpoint es el que usa la barra de búsqueda y es más difícil de bloquear
-        const response = await axios.post(SEARCH_API, {
-            "type": "comic",
-            "search": "" 
-        }, {
+        const dashboard = currentConfig.site.replace("https://", "https://dashboard.");
+        
+        const response = await axios.get(`${dashboard}/api/series`, {
+            params: { 
+                page: req.query.page || 1, 
+                direction: "desc" 
+                // Omitimos 'type' para evitar el filtro restrictivo
+            },
             headers: {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                "Accept": "application/json",
-                "X-XSRF-TOKEN": session.xsrf,
-                "Cookie": session.cookies,
-                "Referer": `${SITE}/biblioteca`,
-                "X-Requested-With": "XMLHttpRequest"
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "es-ES,es;q=0.9",
+                "X-XSRF-TOKEN": currentConfig.xsrf,
+                "Cookie": currentConfig.cookies,
+                "Referer": `${currentConfig.site}/biblioteca`,
+                "Origin": currentConfig.site,
+                "X-Requested-With": "XMLHttpRequest",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-site"
             }
         });
 
-        // 🕵️ Normalizador de emergencia
-        let raw = response.data.data || response.data.series?.data || response.data || [];
-        
-        // Si sigue viniendo vacío, intentamos el endpoint de "novedades"
-        if (raw.length === 0) {
-            const alt = await axios.get("https://dashboard.olympusbiblioteca.com/api/series?type=comic&direction=desc", {
-                headers: { "X-XSRF-TOKEN": session.xsrf, "Cookie": session.cookies, "User-Agent": "Mozilla/5.0" }
-            });
-            raw = alt.data.series?.data || alt.data.data || [];
-        }
+        // 🕵️ Normalización Dinámica (Buscador Universal)
+        let raw = [];
+        const data = response.data;
+        if (data.series?.data) raw = data.series.data;
+        else if (data.data?.data) raw = data.data.data;
+        else if (Array.isArray(data.data)) raw = data.data;
+        else if (Array.isArray(data)) raw = data;
+        else raw = Object.values(data).find(v => Array.isArray(v)) || [];
 
         const clean = raw.map(m => ({
-            name: m.name || m.title,
+            name: m.name || m.title || "Manga",
             slug: m.slug,
-            cover: m.cover?.startsWith('http') ? m.cover : `https://dashboard.olympusbiblioteca.com/storage/covers/${m.cover}`
+            cover: m.cover?.startsWith('http') ? m.cover : `${dashboard}/storage/covers/${m.cover}`
         })).filter(m => m.slug);
 
-        res.json({ data: clean });
+        // Si el resultado es vacío, forzamos un refresh para la próxima
+        if (clean.length === 0) currentConfig.xsrf = "";
+
+        res.json({ data: clean, info: { source: currentConfig.site } });
 
     } catch (err) {
-        res.status(500).json({ data: [], error: err.message, log: "Intenta limpiar cookies en Kotatsu" });
+        res.status(500).json({ data: [], error: err.message });
     }
 });
 
-app.get("/", (req, res) => res.send("🏛️ Imperio Proxy v3: Online"));
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Puerto ${PORT}`));
+app.get("/", (req, res) => res.send("🏛️ Imperio Proxy Híbrido: Online"));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Norte en puerto ${PORT}`));
