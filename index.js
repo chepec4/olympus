@@ -1,71 +1,70 @@
 const express = require("express");
-const puppeteer = require("puppeteer");
+const axios = require("axios");
 const app = express();
 
 const PORT = process.env.PORT || 10000;
+const SITE = "https://olympusbiblioteca.com";
+const API = "https://dashboard.olympusbiblioteca.com/api";
 
-app.get("/", (req, res) => res.send("🔥 Imperio Proxy: Modo Navegador Activo"));
+let session = { cookies: "", xsrf: "" };
 
-app.get("/series", async (req, res) => {
-    let browser = null;
+// 🔥 FUNCIÓN DE INFILTRACIÓN (Warmup)
+async function refreshSession() {
     try {
-        // Lanzamos un navegador minimalista
-        browser = await puppeteer.launch({
-            args: ['--no-sandbox', '--disable-setuid-sandbox'],
-            headless: "new"
+        const res = await axios.get(SITE, {
+            headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36" }
         });
         
-        const page = await browser.newPage();
-        await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36");
+        const setCookies = res.headers["set-cookie"] || [];
+        session.cookies = setCookies.map(c => c.split(";")[0]).join("; ");
+        
+        // Extraer y DECODIFICAR el XSRF-TOKEN (Vital para Laravel)
+        const tokenMatch = session.cookies.match(/XSRF-TOKEN=([^;]+)/);
+        if (tokenMatch) {
+            session.xsrf = decodeURIComponent(tokenMatch[1]);
+        }
+        console.log("✅ Sesión y Token XSRF actualizados");
+    } catch (e) {
+        console.error("❌ Error en Warmup:", e.message);
+    }
+}
 
-        // Vamos a la biblioteca y esperamos a que el JS haga su magia
-        await page.goto("https://olympusbiblioteca.com/biblioteca", {
-            waitUntil: "networkidle2",
-            timeout: 60000
+// Middleware para asegurar que siempre haya sesión
+app.use(async (req, res, next) => {
+    if (!session.xsrf) await refreshSession();
+    next();
+});
+
+app.get("/", (req, res) => res.send("🔥 Proxy Olympus Pro: Online"));
+
+// 📚 LISTA DE SERIES
+app.get("/series", async (req, res) => {
+    try {
+        const page = req.query.page || 1;
+        const response = await axios.get(`${API}/series?type=comic&page=${page}&limit=20`, {
+            headers: {
+                "User-Agent": "Mozilla/5.0",
+                "Accept": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+                "Referer": SITE,
+                "X-XSRF-TOKEN": session.xsrf,
+                "Cookie": session.cookies
+            }
         });
 
-        // Extraemos los datos directamente de la memoria del navegador (Vue/Nuxt)
-        const mangas = await page.evaluate(() => {
-            // Buscamos en el estado interno de Nuxt que aún vive en RAM
-            const nuxt = window.__NUXT__ || window.__NUXT_DATA__;
-            if (!nuxt) return [];
+        // Normalización para Kotatsu
+        const raw = response.data.series?.data || response.data.data || [];
+        const clean = raw.map(m => ({
+            name: m.name,
+            slug: m.slug,
+            cover: m.cover?.startsWith('http') ? m.cover : `https://dashboard.olympusbiblioteca.com/storage/covers/${m.cover}`
+        }));
 
-            // Buscador universal de objetos con slug y name dentro del JSON de Nuxt
-            const results = [];
-            const search = (obj) => {
-                if (obj && typeof obj === 'object') {
-                    if (obj.slug && (obj.name || obj.title)) {
-                        results.push({
-                            name: obj.name || obj.title,
-                            slug: obj.slug,
-                            cover: obj.cover || ""
-                        });
-                    }
-                    Object.values(obj).forEach(search);
-                }
-            };
-            search(nuxt);
-            return results;
-        });
-
-        // Limpiamos duplicados y formateamos covers
-        const cleanData = Array.from(new Set(mangas.map(m => m.slug)))
-            .map(slug => {
-                const m = mangas.find(x => x.slug === slug);
-                return {
-                    name: m.name,
-                    slug: m.slug,
-                    cover: m.cover.startsWith('http') ? m.cover : `https://dashboard.olympusbiblioteca.com/storage/covers/${m.cover}`
-                };
-            });
-
-        res.json({ data: cleanData });
-
+        res.json({ data: clean });
     } catch (err) {
-        res.status(500).json({ data: [], error: err.message });
-    } finally {
-        if (browser) await browser.close(); // Cerramos para no agotar la RAM de Render
+        if (err.response?.status === 419) await refreshSession(); // Auto-reparación
+        res.status(500).json({ error: err.message, details: "Reintentando sesión..." });
     }
 });
 
-app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Norte con Puppeteer en puerto ${PORT}`));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 Proxy Pro en puerto ${PORT}`));
