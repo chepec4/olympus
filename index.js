@@ -6,93 +6,77 @@ const PORT = process.env.PORT || 10000;
 const SITE = "https://olympusbiblioteca.com";
 const API = "https://dashboard.olympusbiblioteca.com/api";
 
-// 🧠 GESTOR DE SESIÓN (Singleton)
-const session = {
-    cookies: "",
-    xsrf: "",
-    lastRefresh: 0,
-    async refresh() {
-        try {
-            const res = await axios.get(SITE, {
-                headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" }
-            });
-            const setCookies = res.headers["set-cookie"] || [];
-            this.cookies = setCookies.map(c => c.split(";")[0]).join("; ");
-            const match = this.cookies.match(/XSRF-TOKEN=([^;]+)/);
-            this.xsrf = match ? decodeURIComponent(match[1]) : "";
-            this.lastRefresh = Date.now();
-            console.log("🔥 Sesión renovada con éxito");
-        } catch (e) {
-            console.error("❌ Error renovando sesión:", e.message);
-        }
-    },
-    async getHeaders() {
-        if (!this.xsrf || (Date.now() - this.lastRefresh > 15 * 60 * 1000)) {
-            await this.refresh();
-        }
-        return {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
-            "X-Requested-With": "XMLHttpRequest",
-            "Referer": SITE,
-            "X-XSRF-TOKEN": this.xsrf,
-            "Cookie": this.cookies
-        };
-    }
-};
+let session = { cookies: "", xsrf: "", last: 0 };
 
-// 🧩 NORMALIZADOR UNIVERSAL (Anti-Error .map)
-function normalize(data) {
-    let raw = [];
-    // Caso 1: Estructura anidada de Laravel (series.data)
-    if (data?.series?.data) raw = data.series.data;
-    // Caso 2: Estructura plana (data)
-    else if (data?.data) raw = data.data;
-    // Caso 3: Array directo
-    else if (Array.isArray(data)) raw = data;
-    // Caso 4: Objeto con llaves numéricas (El asesino del .map)
-    else if (data && typeof data === 'object') raw = Object.values(data);
-
-    // Forzar Array final o lista vacía
-    return Array.isArray(raw) ? raw : [];
+async function refreshSession() {
+    try {
+        const res = await axios.get(SITE, {
+            headers: { 
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+            }
+        });
+        const setCookies = res.headers["set-cookie"] || [];
+        session.cookies = setCookies.map(c => c.split(";")[0]).join("; ");
+        const match = session.cookies.match(/XSRF-TOKEN=([^;]+)/);
+        session.xsrf = match ? decodeURIComponent(match[1]) : "";
+        session.last = Date.now();
+        console.log("🔥 Sesión Renovada (Infiltración lista)");
+    } catch (e) { console.error("❌ Error Sesión:", e.message); }
 }
 
-// 📚 ENDPOINT: SERIES
 app.get("/series", async (req, res) => {
     try {
-        const headers = await session.getHeaders();
+        if (!session.xsrf || Date.now() - session.last > 10 * 60 * 1000) await refreshSession();
+
+        // 🚀 PETICIÓN OPTIMIZADA (Headers Humanos)
         const response = await axios.get(`${API}/series`, {
-            params: {
-                type: "comic",
+            params: { 
+                // Probamos sin 'type' para traer TODO, o cambia a 'manga' si persiste
                 page: req.query.page || 1,
-                direction: "desc",
-                limit: 20
+                direction: "desc"
             },
-            headers
+            headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+                "X-XSRF-TOKEN": session.xsrf,
+                "Cookie": session.cookies,
+                "Referer": `${SITE}/biblioteca`,
+                "Origin": SITE,
+                "X-Requested-With": "XMLHttpRequest",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "same-site"
+            }
         });
 
-        const rawData = normalize(response.data);
+        // 🕵️ DEBUG LOG (Para ver en los logs de Render si viene algo)
+        console.log("🔍 Respuesta API (primeros 100 chars):", JSON.stringify(response.data).substring(0, 100));
+
+        let raw = [];
+        const d = response.data;
         
-        const clean = rawData.map(m => ({
+        // Mapeo dinámico de estructura
+        if (d.series?.data) raw = d.series.data;
+        else if (d.data?.data) raw = d.data.data;
+        else if (Array.isArray(d.data)) raw = d.data;
+        else if (Array.isArray(d)) raw = d;
+        else raw = Object.values(d).find(v => Array.isArray(v)) || [];
+
+        const clean = raw.map(m => ({
             name: m.name || m.title || "Manga",
             slug: m.slug,
             cover: m.cover?.startsWith('http') ? m.cover : `https://dashboard.olympusbiblioteca.com/storage/covers/${m.cover}`
-        })).filter(m => m.slug); // Eliminar basura sin slug
+        })).filter(m => m.slug);
 
         res.json({ data: clean });
 
     } catch (err) {
-        if (err.response?.status === 419) {
-            await session.refresh(); // Forzar refresh si Laravel nos echa
-            return res.status(500).json({ error: "Sesión expirada, reintenta en 2 segundos" });
-        }
-        res.status(500).json({ error: err.message });
+        console.error("❌ Error en /series:", err.message);
+        res.status(500).json({ data: [], error: err.message, status: err.response?.status });
     }
 });
 
-// 🏠 RUTA DE SALUD
-app.get("/", (req, res) => res.send("🏛️ Imperio Proxy Olympus: Activo"));
-
-app.listen(PORT, "0.0.0.0", () => {
-    console.log(`🚀 El Norte ha sido conquistado en el puerto ${PORT}`);
-});
+app.get("/", (req, res) => res.send("🏛️ Imperio Proxy: Online"));
+app.listen(PORT, "0.0.0.0", () => console.log(`🚀 El Norte en puerto ${PORT}`));
